@@ -1,0 +1,4 @@
+/dist/
+/.openai/
+/.artifacts/
+node_modules/
