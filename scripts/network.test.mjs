@@ -42,7 +42,7 @@ test('TCP exposes real byte streams and closes without leaking a socket', async 
   const reader = readable.getReader();
   await writable.getWriter().write(new Uint8Array([0, 255, 42]));
   assert.deepEqual((await reader.read()).value, new Uint8Array([0, 255, 42]));
-  tcp.close();
+  assert.equal(tcp.close(), tcp.closed, 'CheerpX requires close() to return a promise');
   assert.equal((await reader.read()).done, true);
   await tcp.closed;
   assert.equal(network.sockets.size, 0);
@@ -69,7 +69,7 @@ test('DNS datagrams use framed Wisp TCP and reassemble split responses', async (
   assert.equal(localPort, 53000);
   await writable.getWriter().write({data: query, remoteAddress: '8.8.8.8', remotePort: 53});
   assert.deepEqual((await readable.getReader().read()).value, {data: answer, remoteAddress: '8.8.8.8', remotePort: 53});
-  udp.close();
+  assert.equal(udp.close(), udp.closed, 'CheerpX requires close() to return a promise');
   assert.equal(network.sockets.size, 0);
   network.disconnect();
 });

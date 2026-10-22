@@ -43,7 +43,14 @@ export class WispNetwork {
     const ready = deferred();
     this.pending = ready.promise;
     this.onState('connecting');
-    const conn = new this.Connection(this.url);
+    let conn;
+    try { conn = new this.Connection(this.url); }
+    catch (error) {
+      this.pending = null;
+      ready.reject(error);
+      this.onState('disconnected', error.message);
+      return ready.promise;
+    }
     this.connection = conn;
     let timer;
     const failed = (message) => {
@@ -119,7 +126,7 @@ export class WispNetwork {
       else { controller.close(); opened.reject(new Error('Socket closed before opening.')); }
       closed.resolve();
     };
-    const close = () => { if (!ended) stream?.close(2); finish(); };
+    const close = () => { if (!ended) stream?.close(2); finish(); return closed.promise; };
     const socket = {close, fail: (error) => { stream?.close(3); finish(error); }};
     this.sockets.add(socket);
     const readable = new ReadableStream({
@@ -176,7 +183,7 @@ export class WispNetwork {
       else { controller.close(); opened.reject(new Error('Socket closed before opening.')); }
       closed.resolve();
     };
-    const socket = {close: () => finish(), fail: finish};
+    const socket = {close: () => { finish(); return closed.promise; }, fail: finish};
     this.sockets.add(socket);
     const readable = new ReadableStream({start: (value) => { controller = value; }, cancel: () => finish()}, {
       highWaterMark: MAX_BUFFER, size: (message) => message.data.byteLength
