@@ -87,6 +87,15 @@ function progress(message) {
   $('boot-message').textContent = message;
   $('shell-state').textContent = message;
 }
+async function withTimeout(operation, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); })
+    ]);
+  } finally { clearTimeout(timer); }
+}
 function initTerminal() {
   if (term) return;
   if (typeof window.Terminal !== 'function' || !window.FitAddon) throw new Error('The terminal assets did not load. Reload the page and check your connection.');
@@ -181,11 +190,15 @@ async function boot() {
     await acquireRuntimeLock();
     initTerminal();
     progress('Loading CheerpX 1.4.0 from Leaning Technologies…');
-    const CheerpX = await import(ENGINE_URL);
+    const CheerpX = await withTimeout(import(ENGINE_URL), 90000, 'The CheerpX runtime took too long to load. Check access to cxrtnc.leaningtech.com.');
     progress('Connecting the Debian disk. Blocks load on demand…');
     let disk;
-    try { disk = await CheerpX.CloudDevice.create(DISK_URL); }
-    catch { disk = await CheerpX.CloudDevice.create(DISK_URL.replace('wss:', 'https:')); }
+    try {
+      disk = await withTimeout(CheerpX.CloudDevice.create(DISK_URL), 20000, 'The WebSocket disk connection did not respond.');
+    } catch {
+      progress('Trying the HTTPS disk connection…');
+      disk = await withTimeout(CheerpX.CloudDevice.create(DISK_URL.replace('wss:', 'https:')), 45000, 'The WebVM disk service did not respond over WebSocket or HTTPS. Check access to disks.webvm.io.');
+    }
     const cache = await CheerpX.IDBDevice.create(DISK_ID);
     const overlay = await CheerpX.OverlayDevice.create(disk, cache);
     const data = await CheerpX.DataDevice.create();
