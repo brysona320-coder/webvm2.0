@@ -33,7 +33,7 @@
 </defs></svg>
 <aside class="sidebar">
   <a class="brand" href="./" aria-label="BLACKWIRE home"><span class="brandmark">B<span>_</span></span><span>BLACKWIRE<small>WEBVM / 2.0</small></span></a>
-  <div class="sidebar-label">WORKSPACE <span>01</span></div>
+  <div class="sidebar-label"><span id="workspace-label">WORKSPACE</span><span>01</span></div>
   <nav aria-label="Workspace">
     <button class="nav-link active" data-view="terminal"><svg><use href="#i-terminal"/></svg>Terminal <kbd>1</kbd></button>
     <button class="nav-link" data-view="network"><svg><use href="#i-network"/></svg>Network <span class="nav-dot" id="network-dot"></span></button>
@@ -65,6 +65,7 @@
                 <div class="boot-copy"><div class="eyebrow">NO INSTALLATION REQUIRED</div><h2>Your next session<br>starts here<span>.</span></h2><p>Boot a real Debian environment in this tab.<br>Bash, Python, and your curiosity.</p><button class="primary-button" id="boot-button"><svg><use href="#i-terminal"/></svg> Boot Debian <svg><use href="#i-arrow"/></svg></button><p class="boot-hint">Powered by WebVM + CheerpX · disk blocks load on demand</p></div>
                 <div class="boot-progress" id="boot-progress" role="status" hidden><span class="spinner"></span><span id="boot-message">Preparing runtime…</span></div>
                 <div class="boot-error" id="boot-error" role="alert" hidden></div>
+                <button class="secondary-button separate-workspace" id="separate-workspace" hidden>Open a separate lab <svg><use href="#i-arrow"/></svg></button>
               </div>
             </div>
             <div class="terminal-status"><span><i class="tiny-dot" id="shell-dot"></i><span id="shell-state">Ready to boot</span></span><span id="terminal-size">— × —</span><span class="status-right">UTF-8 <span>/</span> bash</span></div>

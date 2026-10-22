@@ -2,7 +2,9 @@
 import {WispNetwork, DEFAULT_WISP_URL, normalizeWispUrl} from './wisp-network.js';
 const ENGINE_URL = 'https://cxrtnc.leaningtech.com/1.4.0/cx.esm.js';
 const DISK_URL = new URL('./images/debian-mini.ext2', import.meta.url).href;
-const DISK_ID = 'blackwire-debian-mini-0805d88e-v1';
+const requestedWorkspace = new URL(location.href).searchParams.get('workspace') || 'default';
+const workspace = /^[a-z0-9-]{1,64}$/i.test(requestedWorkspace) ? requestedWorkspace : 'default';
+const DISK_ID = 'blackwire-debian-mini-0805d88e-v1' + (workspace === 'default' ? '' : `-${workspace}`);
 const $ = (id) => document.getElementById(id);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let cx, term, fitAddon, sendKey, booting = false, bootFailed = false;
@@ -96,7 +98,11 @@ async function acquireRuntimeLock() {
   if (!navigator.locks) return;
   await new Promise((resolve, reject) => {
     navigator.locks.request(DISK_ID, {ifAvailable: true}, async (lock) => {
-      if (!lock) { reject(new Error('This VM disk is already open in another tab. Close that session before booting here.')); return; }
+      if (!lock) {
+        const error = new Error('This VM disk is already open in another tab. Close that session before booting here, or open a separate lab with a fresh disk.');
+        error.code = 'DISK_BUSY';
+        reject(error); return;
+      }
       resolve();
       await new Promise((release) => { releaseRuntimeLock = release; });
     }).catch(reject);
@@ -185,6 +191,7 @@ function reportBootFailure(error) {
   $('boot-progress').hidden = true;
   $('boot-error').hidden = false;
   $('boot-error').textContent = `${error?.message || String(error)}\n\nThe runtime loads from Leaning Technologies and disk blocks from this site. Keep site storage enabled, allow those connections, then reload to retry.`;
+  $('separate-workspace').hidden = error?.code !== 'DISK_BUSY';
   $('boot-button').disabled = false;
   $('boot-button').textContent = 'Reload & retry';
   $('vm-status').textContent = 'Boot interrupted';
@@ -259,6 +266,12 @@ async function boot() {
   } catch (error) { reportBootFailure(error); }
 }
 $('boot-button').addEventListener('click', boot);
+$('separate-workspace').addEventListener('click', () => {
+  const url = new URL(location.href);
+  url.searchParams.set('workspace', `lab-${crypto.randomUUID().slice(0, 8)}`);
+  sessionStorage.setItem('blackwire.resumeBoot', '1');
+  location.assign(url);
+});
 $('boot-from-connect').addEventListener('click', () => {
   $('connect-dialog').close();
   connectAfterBoot = true;
@@ -597,3 +610,4 @@ if (sessionStorage.getItem('blackwire.resumeBoot') === '1') {
 updateShellMode();
 
 updateNetworkSettings();
+$('workspace-label').textContent = workspace === 'default' ? 'WORKSPACE' : workspace.toUpperCase();

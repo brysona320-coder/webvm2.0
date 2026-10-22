@@ -58,7 +58,7 @@ Click **USER** above the terminal to select **ROOT** before booting. During a ru
 
 - The pinned 600 MiB Debian mini image is read-only and streamed from this site in 128 KiB blocks. Disk changes are stored in this browser's IndexedDB overlay.
 - Your files remain tied to this site origin, browser profile, and device. Clearing site data removes them. Browser storage can also be evicted, so keep backups.
-- The app requests a browser lock to prevent concurrent use of the same VM disk by two tabs where the Web Locks API is available.
+- The app requests a browser lock to prevent concurrent use of the same VM disk by two tabs where the Web Locks API is available. If another tab holds the disk, **Open a separate lab** creates a fresh independent overlay, leaving the original files intact. The `workspace` URL parameter identifies that lab; keep the URL to reopen its disk.
 - Field notes autosave in localStorage and can be exported as Markdown.
 - The mini image uses its own overlay ID. An older large-image overlay, if present, is left intact rather than reused against incompatible disk blocks.
 - **Export** downloads the terminal's current text buffer; it is not a disk backup.
