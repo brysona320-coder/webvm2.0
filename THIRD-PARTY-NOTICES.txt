@@ -41,3 +41,15 @@ It is not redistributed in this repository. Separate license terms apply.
 Debian GNU/Linux
 Packages in the streamed image retain their original licenses.
 See /usr/share/doc within the running Debian environment.
+
+
+Wisp-JS 0.5.0
+Copyright MercuryWorkshop and contributors.
+Licensed under LGPL-3.0-or-later.
+Upstream: https://github.com/MercuryWorkshop/wisp-js
+Pinned package: https://www.npmjs.com/package/@mercuryworkshop/wisp-js/v/0.5.0
+The unmodified browser client is vendor/wisp-client.mjs, with its source map
+and corresponding client sources in vendor/wisp-source/. It is loaded as a
+separate, replaceable ES module. LGPL and GPL license texts are included as
+vendor/LICENSE-wisp-LGPL-3.0.txt and vendor/LICENSE-GPL-3.0.txt.
+BLACKWIRE's adapter is independently maintained in wisp-network.js.

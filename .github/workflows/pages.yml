@@ -29,6 +29,11 @@ jobs:
         run: npm test
       - name: Build static assets
         run: npm run build
+      - name: Prepare Debian disk blocks
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/debian-mini.ext2" https://github.com/leaningtech/webvm/releases/download/ext2_image/debian_mini_20230519_5022088024.ext2
+          node scripts/prepare-disk.mjs "$RUNNER_TEMP/debian-mini.ext2" dist/images/debian-mini.ext2
       - name: Configure Pages
         uses: actions/configure-pages@v5
         with:

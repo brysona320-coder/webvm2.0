@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A browser-based Debian terminal with Tailscale, built on WebVM and CheerpX",
+  "description": "A browser-based Debian terminal with Wisp and optional Tailscale, built on WebVM and CheerpX",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "test": "node --test scripts/validate.test.mjs"
+    "test": "node --test scripts/*.test.mjs"
   },
   "license": "Apache-2.0"
 }

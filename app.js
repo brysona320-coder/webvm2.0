@@ -1,7 +1,8 @@
 // BLACKWIRE: a client-side CheerpX integration. No simulated command responses.
+import {WispNetwork, DEFAULT_WISP_URL, normalizeWispUrl} from './wisp-network.js';
 const ENGINE_URL = 'https://cxrtnc.leaningtech.com/1.4.0/cx.esm.js';
-const DISK_URL = 'wss://disks.webvm.io/debian_buster_large_permis_fixed_01-06-2026.ext2';
-const DISK_ID = 'blackwire-debian-buster-v1';
+const DISK_URL = new URL('./images/debian-mini.ext2', import.meta.url).href;
+const DISK_ID = 'blackwire-debian-mini-0805d88e-v1';
 const $ = (id) => document.getElementById(id);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 let cx, term, fitAddon, sendKey, booting = false, bootFailed = false;
@@ -9,12 +10,31 @@ let startedAt = 0, connected = false, loginPending = false, loginTimer, outputSe
 let fontSize = window.innerWidth < 700 ? 11 : 12;
 let connectAfterBoot = false, pendingCommand = '', releaseRuntimeLock;
 let resizeFrame, toastTimer, currentLoginUrl = null;
+function savedSetting(key, fallback) { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } }
+let shellMode = savedSetting('blackwire.shellMode', 'user') === 'root' ? 'root' : 'user';
+let networkMode = savedSetting('blackwire.networkMode', 'wisp') === 'tailscale' ? 'tailscale' : 'wisp';
+let wispUrl;
+try { wispUrl = normalizeWispUrl(savedSetting('blackwire.wispUrl', DEFAULT_WISP_URL)); } catch { wispUrl = DEFAULT_WISP_URL; }
+let wisp, pendingNetworkMode = networkMode, pendingWispUrl = wispUrl;
+let bytesSent = 0, bytesReceived = 0;
+let pendingShellMode = shellMode, allowRestart = false;
 
 function toast(message) {
   $('toast').textContent = message;
   $('toast').hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 4500);
+}
+function updateShellMode() {
+  $('shell-mode').textContent = shellMode.toUpperCase();
+  $('shell-mode').classList.toggle('root', shellMode === 'root');
+  $('shell-mode').title = shellMode === 'root' ? 'Root shell selected — switch to user' : 'User shell selected — switch to root';
+  $('shell-mode').setAttribute('aria-label', $('shell-mode').title);
+}
+function saveShellMode(mode) {
+  shellMode = mode;
+  try { localStorage.setItem('blackwire.shellMode', mode); } catch {}
+  updateShellMode();
 }
 function showView(view) {
   if (!['terminal', 'network', 'toolkit', 'notes'].includes(view)) return;
@@ -164,7 +184,7 @@ function reportBootFailure(error) {
   $('boot-screen').classList.remove('loading');
   $('boot-progress').hidden = true;
   $('boot-error').hidden = false;
-  $('boot-error').textContent = `${error?.message || String(error)}\n\nThe runtime and Debian disk are loaded from Leaning Technologies / WebVM. Allow those connections, keep site storage enabled, then reload to retry.`;
+  $('boot-error').textContent = `${error?.message || String(error)}\n\nThe runtime loads from Leaning Technologies and disk blocks from this site. Keep site storage enabled, allow those connections, then reload to retry.`;
   $('boot-button').disabled = false;
   $('boot-button').textContent = 'Reload & retry';
   $('vm-status').textContent = 'Boot interrupted';
@@ -191,47 +211,48 @@ async function boot() {
     initTerminal();
     progress('Loading CheerpX 1.4.0 from Leaning Technologies…');
     const CheerpX = await withTimeout(import(ENGINE_URL), 90000, 'The CheerpX runtime took too long to load. Check access to cxrtnc.leaningtech.com.');
-    progress('Connecting the Debian disk. Blocks load on demand…');
-    let disk;
-    try {
-      disk = await withTimeout(CheerpX.CloudDevice.create(DISK_URL), 20000, 'The WebSocket disk connection did not respond.');
-    } catch {
-      progress('Trying the HTTPS disk connection…');
-      disk = await withTimeout(CheerpX.CloudDevice.create(DISK_URL.replace('wss:', 'https:')), 45000, 'The WebVM disk service did not respond over WebSocket or HTTPS. Check access to disks.webvm.io.');
-    }
+    progress('Loading Debian disk blocks from this site…');
+    const disk = await withTimeout(CheerpX.GitHubDevice.create(DISK_URL), 45000, 'The Debian disk blocks could not be loaded. Check that the Pages disk preparation step succeeded.');
     const cache = await CheerpX.IDBDevice.create(DISK_ID);
     const overlay = await CheerpX.OverlayDevice.create(disk, cache);
     const data = await CheerpX.DataDevice.create();
+    const isRoot = shellMode === 'root';
+    const account = isRoot ? {name: 'root', home: '/root', uid: 0, gid: 0, prompt: '#'} : {name: 'user', home: '/home/user', uid: 1000, gid: 1000, prompt: '$'};
     await data.writeFile('/blackwire.bashrc', [
       '[ -f /etc/bash.bashrc ] && . /etc/bash.bashrc',
       '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"',
-      'export PS1="\\[\\e[38;5;150m\\]user@blackwire\\[\\e[0m\\]:\\[\\e[38;5;109m\\]\\w\\[\\e[0m\\] \\$ "',
+      `export PS1="\\[\\e[38;5;150m\\]${account.name}@blackwire\\[\\e[0m\\]:\\[\\e[38;5;109m\\]\\w\\[\\e[0m\\] ${account.prompt} "`,
       'printf "\\n\\033[38;5;150m  BLACKWIRE / DEBIAN WORKSPACE\\033[0m\\n"',
       'printf "  Real x86 programs. Local browser execution.\\n"',
-      'printf "  Connect Tailscale for networking; curl for connectivity checks.\\n\\n"'
+      'printf "  Wisp provides internet access; use Network to change protocol.\\n\\n"'
     ].join('\n'));
     progress('Creating the Linux environment and starting Bash…');
+    wisp = networkMode === 'wisp' ? new WispNetwork(wispUrl, {onState: updateWispState, onTraffic: updateWispTraffic}) : null;
     cx = await CheerpX.Linux.create({
       mounts: [
         {type: 'ext2', path: '/', dev: overlay},
-        {type: 'dir', path: '/data', dev: data},
+        {type: 'dir', path: '/mnt', dev: data},
         {type: 'devs', path: '/dev'},
         {type: 'devpts', path: '/dev/pts'},
         {type: 'proc', path: '/proc'},
         {type: 'sys', path: '/sys'}
       ],
-      networkInterface: {loginUrlCb, stateUpdateCb, netmapUpdateCb}
+      networkInterface: wisp || {loginUrlCb, stateUpdateCb, netmapUpdateCb}
     });
     cx.registerCallback('cpuActivity', (state) => $('cpu-dot').classList.toggle('on', state !== 'ready'));
     cx.registerCallback('diskActivity', (state) => $('disk-dot').classList.toggle('on', state !== 'ready'));
     resizeTerminal();
+    if (wisp) wisp.up().catch(() => {});
     $('vm-dot').classList.remove('warning');
+    // The upstream 2023 mini image exports its home directory as root-owned.
+    // Give the regular account a writable home in its own persistent overlay.
+    if (!isRoot) await cx.run('/bin/chown', ['1000:1000', '/home/user'], {uid: 0, gid: 0});
     // A real Bash process handles every command, completion, history, and Ctrl-C.
     // Exiting Bash opens a fresh shell against the same persistent overlay.
     while (true) {
-      await cx.run('/bin/bash', ['--rcfile', '/data/blackwire.bashrc', '-i'], {
-        env: ['HOME=/home/user', 'TERM=xterm-256color', 'USER=user', 'LOGNAME=user', 'SHELL=/bin/bash', 'EDITOR=vim', 'LANG=en_US.UTF-8', 'LC_ALL=C', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'],
-        cwd: '/home/user', uid: 1000, gid: 1000
+      await cx.run('/bin/bash', ['--rcfile', '/mnt/blackwire.bashrc', '-i'], {
+        env: [`HOME=${account.home}`, 'TERM=xterm-256color', `USER=${account.name}`, `LOGNAME=${account.name}`, 'SHELL=/bin/bash', 'EDITOR=vim', 'LANG=en_US.UTF-8', 'LC_ALL=C', 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'],
+        cwd: account.home, uid: account.uid, gid: account.gid
       });
       term.writeln('\r\n\x1b[38;5;150mShell exited. Opening a new session…\x1b[0m\r\n');
     }
@@ -259,6 +280,7 @@ function loginUrlCb(url) {
   } catch (error) { loginFailure(error.message); }
 }
 function stateUpdateCb(state) {
+  if (networkMode !== 'tailscale') return;
   const running = state === 6;
   connected = running;
   $('network-dot').classList.toggle('on', running);
@@ -297,6 +319,7 @@ function createEmptyPeers() {
   return empty;
 }
 function netmapUpdateCb(map) {
+  if (networkMode !== 'tailscale') return;
   const address = map?.self?.addresses?.[0] || 'Not assigned';
   const peers = Array.isArray(map?.peers) ? map.peers : [];
   $('vm-ip').textContent = address;
@@ -331,7 +354,93 @@ function loginFailure(message) {
   $('connect-description').textContent = message;
   $('retry-login').hidden = false;
 }
+function updateNetworkSettings() {
+  const isWisp = networkMode === 'wisp';
+  $('network-mode').value = networkMode;
+  $('wisp-url').value = wispUrl;
+  $('wisp-settings').hidden = !isWisp;
+  $('wisp-metrics').hidden = !isWisp;
+  $('tailnet-peers').hidden = isWisp;
+  $('tailnet-guide').hidden = isWisp;
+  $('network-intro').textContent = isWisp ? 'Internet access through Anura’s Wisp relay. No tailnet or exit node required.' : 'Bring your browser VM into your tailnet.';
+  $('connect-label').textContent = isWisp ? 'Connect Wisp' : 'Connect Tailscale';
+  $('side-connect-label').textContent = isWisp ? 'Connect Wisp relay' : 'Connect to Tailscale';
+  $('network-connect-label').textContent = isWisp ? 'Connect Wisp' : 'Connect Tailscale';
+  $('uplink-description').textContent = isWisp ? 'Your Debian VM is local. Wisp carries its outbound connections.' : 'Your Debian VM is local. Connect Tailscale to go further.';
+  $('topology-relay').textContent = isWisp ? 'Wisp / WSS' : 'Tailscale';
+  $('topology-destination').textContent = isWisp ? 'Internet' : 'Your tailnet';
+  $('topology-destination-hint').textContent = isWisp ? 'Outbound TCP + UDP' : 'Private network';
+  $('transport').textContent = isWisp ? 'Wisp / secure WebSocket' : 'WireGuard / relay';
+  $('vm-ip-label').textContent = isWisp ? 'Route' : 'VM address';
+  if (isWisp) updateWispState(wisp?.connection?.connected ? 'connected' : 'disconnected');
+  else {
+    $('network-state').textContent = 'Disconnected';
+    $('uplink-tag').textContent = 'Not connected';
+    $('vm-ip').textContent = 'Not assigned';
+    $('network-address').textContent = 'Waiting for login';
+    $('exit-status').textContent = 'Exit node required';
+  }
+}
+function saveNetworkSettings(mode, url) {
+  networkMode = mode;
+  wispUrl = url;
+  try { localStorage.setItem('blackwire.networkMode', mode); localStorage.setItem('blackwire.wispUrl', url); } catch {}
+  updateNetworkSettings();
+}
+function updateWispState(state, message = '') {
+  if (networkMode !== 'wisp') return;
+  connected = state === 'connected';
+  const label = {connecting: 'Connecting relay…', connected: 'Wisp relay connected', disconnected: 'Relay disconnected'}[state];
+  $('network-dot').classList.toggle('on', connected);
+  $('network-state').textContent = label;
+  $('network-state').classList.toggle('connected', connected);
+  $('uplink-tag').textContent = label;
+  $('uplink-tag').classList.toggle('connected', connected);
+  $('relay-state').textContent = connected ? 'Connected' : state === 'connecting' ? 'Connecting' : 'Disconnected';
+  $('relay-endpoint').textContent = wispUrl;
+  $('vm-ip').textContent = connected ? 'Via Wisp relay' : 'Not connected';
+  $('network-address').textContent = new URL(wispUrl).hostname;
+  $('exit-status').textContent = 'No exit node needed';
+  $('exit-status').style.color = 'var(--accent-dim)';
+  $('wisp-message').textContent = message || (connected ? 'The relay handshake succeeded. Use curl in Debian to check a destination.' : state === 'connecting' ? 'Opening a secure WebSocket and negotiating Wisp…' : 'Boot Debian to connect automatically, or use Connect Wisp to retry.');
+}
+function updateWispTraffic(direction, count) {
+  if (direction === 'sent') bytesSent += count;
+  else bytesReceived += count;
+  const format = (value) => value < 1024 ? `${value} B` : value < 1048576 ? `${(value / 1024).toFixed(1)} KiB` : `${(value / 1048576).toFixed(1)} MiB`;
+  $('bytes-sent').textContent = format(bytesSent);
+  $('bytes-received').textContent = format(bytesReceived);
+}
+$('network-mode').addEventListener('change', () => {
+  $('wisp-settings').hidden = $('network-mode').value !== 'wisp';
+});
+$('network-settings').addEventListener('submit', (event) => {
+  event.preventDefault();
+  let nextUrl;
+  try { nextUrl = normalizeWispUrl($('wisp-url').value); }
+  catch (error) { toast(error.message); $('wisp-url').focus(); return; }
+  const nextMode = $('network-mode').value;
+  if (nextMode === networkMode && nextUrl === wispUrl) { toast('Network settings are already saved.'); return; }
+  if (!booting && !cx && !outputSeen) {
+    saveNetworkSettings(nextMode, nextUrl);
+    toast('Network settings saved for the next boot.');
+    return;
+  }
+  pendingShellMode = shellMode;
+  pendingNetworkMode = nextMode;
+  pendingWispUrl = nextUrl;
+  $('restart-title').textContent = 'Restart to apply networking?';
+  $('restart-description').textContent = `Running programs will stop. Your VM disk will be kept, and Debian will use ${nextMode === 'wisp' ? 'the selected Wisp relay' : 'Tailscale'} after restarting.`;
+  showDialog('reset-dialog');
+});
 function openConnection() {
+  if (networkMode === 'wisp') {
+    showView('network');
+    if (!cx) { connectAfterBoot = false; boot(); }
+    else if (wisp?.connection?.connected) toast('The Wisp relay is connected.');
+    else wisp?.up().catch((error) => toast(error.message));
+    return;
+  }
   showDialog('connect-dialog');
   $('boot-from-connect').hidden = Boolean(cx);
   if (!cx) {
@@ -374,9 +483,9 @@ const tools = [
   ['System identity', 'Read the release information from the Debian filesystem.', 'cat /etc/os-release', 'SYSTEM', 'terminal'],
   ['Python runtime', 'Check the Python interpreter installed inside your VM.', 'python3 --version', 'DEVELOPMENT', 'box'],
   ['HTTP headers', 'Inspect the response headers of an example web server. Requires networking.', 'curl -I https://example.com', 'NETWORK', 'network'],
-  ['Socket overview', 'Inspect socket information exposed by the emulated environment.', 'ss -tuln', 'NETWORK', 'network'],
+  ['DNS lookup', 'Resolve a public hostname through the selected network.', `python3 -c "import socket; print(socket.gethostbyname('example.com'))"`, 'NETWORK', 'network'],
   ['File fingerprints', 'Calculate a SHA-256 digest with the installed Debian tools.', 'sha256sum /etc/os-release', 'FILES', 'shield'],
-  ['Git version', 'Check your version of Git before starting a project.', 'git --version', 'DEVELOPMENT', 'box'],
+  ['Package manager', 'Check the package manager before installing additional tools.', 'apt --version', 'DEVELOPMENT', 'box'],
   ['Working directory', 'Explore files and permissions in your current directory.', 'ls -lah', 'FILES', 'notes'],
   ['Process view', 'See processes visible to the browser’s Linux environment.', 'ps aux', 'SYSTEM', 'terminal'],
   ['Local HTTP server', 'Run Python’s HTTP server inside Debian. Stop it with Ctrl-C.', 'python3 -m http.server 8000', 'DEVELOPMENT', 'network']
@@ -425,13 +534,32 @@ function changeFont(amount) {
 }
 $('font-down').addEventListener('click', () => changeFont(-1));
 $('font-up').addEventListener('click', () => changeFont(1));
+$('shell-mode').addEventListener('click', () => {
+  pendingShellMode = shellMode === 'root' ? 'user' : 'root';
+  if (!booting && !cx && !outputSeen) {
+    saveShellMode(pendingShellMode);
+    toast(`${pendingShellMode === 'root' ? 'Root' : 'User'} shell selected for the next boot.`);
+    return;
+  }
+  pendingNetworkMode = networkMode;
+  pendingWispUrl = wispUrl;
+  $('restart-title').textContent = `Restart as ${pendingShellMode}?`;
+  $('restart-description').textContent = `Running programs will stop. The VM disk will be kept, and the new shell will start as ${pendingShellMode === 'root' ? 'UID 0 without a password' : 'the unprivileged user account'}.`;
+  showDialog('reset-dialog');
+});
 $('expand-terminal').addEventListener('click', () => {
   const expanded = document.querySelector('.terminal-panel').classList.toggle('expanded');
   $('expand-terminal').setAttribute('aria-label', expanded ? 'Restore terminal size' : 'Expand terminal');
   $('expand-terminal').title = expanded ? 'Restore terminal size' : 'Expand terminal';
   resizeTerminal();
 });
-$('confirm-restart').addEventListener('click', () => { sessionStorage.setItem('blackwire.resumeBoot', '1'); location.reload(); });
+$('confirm-restart').addEventListener('click', () => {
+  saveShellMode(pendingShellMode);
+  saveNetworkSettings(pendingNetworkMode, pendingWispUrl);
+  sessionStorage.setItem('blackwire.resumeBoot', '1');
+  allowRestart = true;
+  location.reload();
+});
 
 function updateNotesCount() { $('notes-count').textContent = `${$('notes').value.length.toLocaleString()} characters`; }
 try { $('notes').value = localStorage.getItem('blackwire.fieldNotes') || ''; }
@@ -453,7 +581,7 @@ window.addEventListener('keydown', (event) => {
   if (event.key === '/') { event.preventDefault(); showView('toolkit'); $('tool-search').focus(); }
 });
 window.addEventListener('beforeunload', (event) => {
-  if (outputSeen) { event.preventDefault(); event.returnValue = ''; }
+  if (outputSeen && !allowRestart) { event.preventDefault(); event.returnValue = ''; }
 });
 setInterval(() => {
   if (!startedAt) return;
@@ -466,3 +594,6 @@ if (sessionStorage.getItem('blackwire.resumeBoot') === '1') {
   sessionStorage.removeItem('blackwire.resumeConnect');
   boot();
 }
+updateShellMode();
+
+updateNetworkSettings();
