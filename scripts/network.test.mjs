@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {WispNetwork, normalizeWispUrl} from '../wisp-network.js';
+import {WispNetwork, normalizeWispUrl, probeWispRelay, WISP_PRESETS} from '../wisp-network.js';
 
 class Relay {
   constructor() {
@@ -103,4 +103,159 @@ test('ordinary UDP datagrams preserve the remote address and port', async () => 
   await writable.getWriter().write(message);
   assert.deepEqual((await readable.getReader().read()).value, message);
   udp.close(); network.disconnect();
+});
+
+test('cancelling TCP and UDP readers does not close an already cancelled controller', async () => {
+  const network = new WispNetwork('anura.pro', {Connection: Relay});
+  for (const socket of [network.TCPSocket('example.com', 80), network.UDPSocket()]) {
+    const info = await socket.opened;
+    await info.readable.getReader().cancel();
+    await socket.closed;
+    await socket.close();
+  }
+  assert.equal(network.sockets.size, 0);
+  network.disconnect();
+});
+
+test('a throwing WebSocket close cannot leave TCP or UDP sockets stuck', async () => {
+  class BrokenCloseRelay extends Relay {
+    create_stream(...args) {
+      const stream = super.create_stream(...args);
+      stream.close = () => { throw new Error('WebSocket is already closed'); };
+      return stream;
+    }
+  }
+  const network = new WispNetwork('anura.pro', {Connection: BrokenCloseRelay});
+  const tcp = network.TCPSocket('example.com', 80), udp = network.UDPSocket();
+  const tcpInfo = await tcp.opened, udpInfo = await udp.opened;
+  const pendingTCP = tcpInfo.readable.getReader().read();
+  const pendingUDP = udpInfo.readable.getReader().read();
+  await udpInfo.writable.getWriter().write({data: new Uint8Array([1]), remoteAddress: '192.0.2.1', remotePort: 1234});
+  const connection = network.connection;
+  network.disconnect();
+  await assert.rejects(pendingTCP, /disconnected/);
+  await assert.rejects(pendingUDP, /disconnected/);
+  await Promise.all([tcp.closed, udp.closed]);
+  assert.equal(network.sockets.size, 0);
+  assert.equal(Object.keys(connection.active_streams).length, 0);
+  assert.equal(network.pending, null);
+});
+
+test('disconnecting during a handshake allows immediate retry and ignores late callbacks', async () => {
+  class WaitingRelay {
+    constructor() { this.connected = false; this.active_streams = {}; }
+    close() { this.connected = false; }
+  }
+  const network = new WispNetwork('anura.pro', {Connection: WaitingRelay});
+  const first = network.up(), firstConnection = network.connection, staleOpen = firstConnection.onopen;
+  network.disconnect();
+  await assert.rejects(first, /disconnected/);
+  const second = network.up(), secondConnection = network.connection;
+  firstConnection.connected = true; staleOpen();
+  assert.equal(network.connection, secondConnection);
+  assert.equal(network.pending, second);
+  secondConnection.connected = true; secondConnection.onopen();
+  assert.equal(await second, secondConnection);
+  assert.equal(network.pending, null);
+  network.disconnect();
+});
+
+test('relay shutdown can notify multiple UDP streams without callback reentrancy errors', async () => {
+  class DroppingRelay extends Relay {
+    drop() {
+      this.connected = false;
+      for (const id of Object.keys(this.active_streams)) {
+        this.active_streams[id].onclose(3);
+        delete this.active_streams[id];
+      }
+      this.onclose();
+    }
+  }
+  const network = new WispNetwork('anura.pro', {Connection: DroppingRelay});
+  const udp = network.UDPSocket(), {readable, writable} = await udp.opened;
+  const writer = writable.getWriter();
+  await writer.write({data: new Uint8Array([1]), remoteAddress: '192.0.2.1', remotePort: 1234});
+  await writer.write({data: new Uint8Array([2]), remoteAddress: '192.0.2.2', remotePort: 1234});
+  const response = readable.getReader().read();
+  assert.doesNotThrow(() => network.connection.drop());
+  await assert.rejects(response, /reset/);
+  await udp.closed;
+  assert.equal(network.connection, null);
+  assert.equal(network.sockets.size, 0);
+});
+
+test('a failed DNS request does not poison the UDP writer or prevent a retry', async () => {
+  const issues = [];
+  const network = new WispNetwork('anura.pro', {Connection: Relay, onIssue: (message) => issues.push(message)});
+  let requests = 0;
+  network.queryDNS = async () => {
+    if (++requests === 1) throw new Error('DNS destination blocked by relay');
+    return new Uint8Array([42, 57]);
+  };
+  const udp = network.UDPSocket(), {readable, writable} = await udp.opened;
+  const writer = writable.getWriter();
+  const request = {data: new Uint8Array([1]), remoteAddress: '8.8.8.8', remotePort: 53};
+  await writer.write(request);
+  await writer.write({...request, remoteAddress: '8.8.4.4'});
+  assert.deepEqual((await readable.getReader().read()).value.data, new Uint8Array([42, 57]));
+  assert.equal(requests, 2);
+  assert.match(issues[0], /blocked/);
+  await udp.close(); network.disconnect();
+});
+
+test('closing a UDP socket aborts its pending DNS work', async () => {
+  const network = new WispNetwork('anura.pro', {Connection: Relay});
+  let requestSignal;
+  network.queryDNS = (data, host, port, {signal}) => new Promise((resolve, reject) => {
+    requestSignal = signal;
+    signal.addEventListener('abort', () => reject(new Error('cancelled')), {once: true});
+  });
+  const udp = network.UDPSocket(), {writable} = await udp.opened;
+  await writable.getWriter().write({data: new Uint8Array([1]), remoteAddress: '8.8.8.8', remotePort: 53});
+  assert.equal(requestSignal.aborted, false);
+  await udp.close();
+  assert.equal(requestSignal.aborted, true);
+  network.disconnect();
+});
+
+test('the relay probe reports a blocked DNS route instead of claiming internet access', async () => {
+  class DNSBlockedRelay extends Relay {
+    create_stream(...args) {
+      const stream = super.create_stream(...args);
+      stream.send = () => queueMicrotask(() => stream.onclose(0x48));
+      return stream;
+    }
+  }
+  const result = await probeWispRelay('anura.pro', {Connection: DNSBlockedRelay});
+  assert.equal(result.ok, false);
+  assert.equal(result.failedStage, 'dns');
+  assert.equal(result.checks[0].stage, 'handshake');
+  assert.equal(result.checks[0].status, 'passed');
+  assert.match(result.error, /blocked/);
+});
+
+test('the relay probe requires both a matching DNS answer and an HTTP response', async () => {
+  class WorkingRelay extends Relay {
+    create_stream(...args) {
+      const stream = super.create_stream(...args);
+      stream.send = (data) => queueMicrotask(() => {
+        if (stream.port === 53) {
+          const question = data.slice(2), answer = new Uint8Array(question.length + 16);
+          answer.set(question); answer[2] = 0x81; answer[3] = 0x80; answer[7] = 1;
+          answer.set([0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 203, 0, 113, 10], question.length);
+          const framed = new Uint8Array(answer.length + 2); framed[1] = answer.length; framed.set(answer, 2);
+          stream.onmessage(framed);
+        } else {
+          assert.equal(stream.hostname, '203.0.113.10');
+          stream.onmessage(new TextEncoder().encode('HTTP/1.1 200 OK\r\n\r\n'));
+        }
+      });
+      return stream;
+    }
+  }
+  const result = await probeWispRelay('anura.pro', {Connection: WorkingRelay});
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.checks.map((item) => item.stage), ['handshake', 'dns', 'http']);
+  assert.match(result.checks[2].detail, /200 OK/);
+  for (const preset of WISP_PRESETS) assert.equal(normalizeWispUrl(preset.url), preset.url);
 });

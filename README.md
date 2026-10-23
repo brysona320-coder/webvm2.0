@@ -21,9 +21,23 @@ Use a current desktop browser with WebAssembly, SharedArrayBuffer, IndexedDB, an
 
 The default protocol is **Wisp**, using **`wss://anura.pro/`** as requested. No Tailscale account, installed VPN client, Debian host, or exit node is needed. The VM runs locally; outbound connections pass through the selected third-party relay.
 
-Open **Network** to change the secure WebSocket relay URL, reconnect, or select Tailscale instead. Connection status and byte counters use the real relay handshake and traffic. Saving a different protocol or relay restarts a running VM after confirmation and keeps its disk.
+Open **Network** to choose a relay preset, enter a custom secure WebSocket URL, reconnect, or select Tailscale instead. Applying a different Wisp relay closes current network connections and reconnects without restarting Debian. Retry interrupted network commands afterwards. Switching between Wisp and Tailscale still offers a VM restart and keeps its disk.
 
-The CheerpX 1.4 custom network interface is backed by standard readable/writable streams. `wisp-network.js` adapts these to Wisp TCP and UDP streams. DNS datagrams on port 53 are carried as length-prefixed DNS-over-TCP through the same Wisp relay: Anura’s TCP path passed our DNS test while its UDP DNS path did not respond. Other UDP destinations depend on relay policy. Wisp supplies outbound connections; it does not publish listening VM ports.
+**Test selected relay** works before booting Debian. It separately checks the Wisp handshake, a DNS answer through the relay, and an HTTP response from `example.com`. Each stage reports a real result; a handshake alone is never reported as successful internet access. The test does not change the VM’s selected relay. Public relay availability varies by network, so test a preset before applying it.
+
+Included presets:
+
+| Preset | Endpoint | Published source |
+| --- | --- | --- |
+| Anura (default) | `wss://anura.pro/` | User-selected endpoint |
+| Anura alternate path | `wss://anura.pro/wisp/` | Same operator; separately tested endpoint |
+| Mercury Workshop | `wss://wisp.mercurywork.shop/` | [Official transport documentation](https://github.com/MercuryWorkshop/bare-mux/blob/master/documentation/Upgrading.md) |
+| RHW / SPLASH | `wss://wisp.rhw.one/wisp/` | [Operator’s project README](https://github.com/rhenryw/SPLASH) |
+| Widgetry | `wss://relay.widgetry.org/` | [Anura’s published configuration](https://anura.pro/config.json) |
+
+Custom relay URLs remain supported. Presets are endpoints, not uptime guarantees or an endorsement of a third-party operator. The app never silently moves your VM traffic to another server.
+
+The CheerpX 1.4 custom network interface is backed by standard readable/writable streams. `wisp-network.js` adapts these to Wisp TCP and UDP streams. DNS datagrams on port 53 are carried as length-prefixed DNS-over-TCP through the same Wisp relay: Anura’s TCP path passed our DNS test while its UDP DNS path did not respond. DNS sends are asynchronous: a failed query does not block the UDP writer or prevent a nameserver retry. Other UDP destinations depend on relay policy. Wisp supplies outbound connections; it does not publish listening VM ports.
 
 Test from the real Debian shell:
 
@@ -32,7 +46,7 @@ curl -I https://example.com
 python3 -c "import socket; print(socket.gethostbyname('example.com'))"
 ```
 
-Anura is an independent third-party relay. Its uptime, destination restrictions, and usage rules apply. The app does not silently switch to another relay. A connected relay status confirms the handshake, not that every internet destination is reachable.
+Anura is an independent third-party relay. Its uptime, destination restrictions, and usage rules apply. A connected relay status confirms the handshake, not that every internet destination is reachable. If networking stops, use **Reconnect Wisp**, or test and apply another preset. The adapter clears failed handshakes and socket state so retries can start immediately. Cancelling a reader, a closed WebSocket, or a relay shutdown cannot interrupt local socket cleanup.
 
 ## Optional Tailscale networking
 

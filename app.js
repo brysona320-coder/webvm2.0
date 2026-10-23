@@ -1,5 +1,5 @@
 // BLACKWIRE: a client-side CheerpX integration. No simulated command responses.
-import {WispNetwork, DEFAULT_WISP_URL, normalizeWispUrl} from './wisp-network.js';
+import {WispNetwork, DEFAULT_WISP_URL, WISP_PRESETS, normalizeWispUrl, probeWispRelay} from './wisp-network.js';
 const ENGINE_URL = 'https://cxrtnc.leaningtech.com/1.4.0/cx.esm.js';
 const DISK_URL = new URL('./images/debian-mini.ext2', import.meta.url).href;
 const requestedWorkspace = new URL(location.href).searchParams.get('workspace') || 'default';
@@ -19,6 +19,7 @@ let wispUrl;
 try { wispUrl = normalizeWispUrl(savedSetting('blackwire.wispUrl', DEFAULT_WISP_URL)); } catch { wispUrl = DEFAULT_WISP_URL; }
 let wisp, pendingNetworkMode = networkMode, pendingWispUrl = wispUrl;
 let bytesSent = 0, bytesReceived = 0;
+let testingRelay = false;
 let pendingShellMode = shellMode, allowRestart = false;
 
 function toast(message) {
@@ -234,7 +235,7 @@ async function boot() {
       'printf "  Wisp provides internet access; use Network to change protocol.\\n\\n"'
     ].join('\n'));
     progress('Creating the Linux environment and starting Bash…');
-    wisp = networkMode === 'wisp' ? new WispNetwork(wispUrl, {onState: updateWispState, onTraffic: updateWispTraffic}) : null;
+    wisp = networkMode === 'wisp' ? new WispNetwork(wispUrl, {onState: updateWispState, onTraffic: updateWispTraffic, onIssue: updateWispIssue}) : null;
     cx = await CheerpX.Linux.create({
       mounts: [
         {type: 'ext2', path: '/', dev: overlay},
@@ -371,11 +372,12 @@ function updateNetworkSettings() {
   const isWisp = networkMode === 'wisp';
   $('network-mode').value = networkMode;
   $('wisp-url').value = wispUrl;
-  $('wisp-settings').hidden = !isWisp;
+  showWispFields(isWisp);
+  syncRelayPreset();
   $('wisp-metrics').hidden = !isWisp;
   $('tailnet-peers').hidden = isWisp;
   $('tailnet-guide').hidden = isWisp;
-  $('network-intro').textContent = isWisp ? 'Internet access through Anura’s Wisp relay. No tailnet or exit node required.' : 'Bring your browser VM into your tailnet.';
+  $('network-intro').textContent = isWisp ? `Outbound internet through ${new URL(wispUrl).hostname}. Test the relay or choose another preset below.` : 'Bring your browser VM into your tailnet.';
   $('connect-label').textContent = isWisp ? 'Connect Wisp' : 'Connect Tailscale';
   $('side-connect-label').textContent = isWisp ? 'Connect Wisp relay' : 'Connect to Tailscale';
   $('network-connect-label').textContent = isWisp ? 'Connect Wisp' : 'Connect Tailscale';
@@ -416,6 +418,15 @@ function updateWispState(state, message = '') {
   $('exit-status').textContent = 'No exit node needed';
   $('exit-status').style.color = 'var(--accent-dim)';
   $('wisp-message').textContent = message || (connected ? 'The relay handshake succeeded. Use curl in Debian to check a destination.' : state === 'connecting' ? 'Opening a secure WebSocket and negotiating Wisp…' : 'Boot Debian to connect automatically, or use Connect Wisp to retry.');
+  const buttonText = connected ? 'Reconnect Wisp' : state === 'connecting' ? 'Connecting Wisp…' : 'Connect Wisp';
+  for (const id of ['connect-label', 'side-connect-label', 'network-connect-label']) $(id).textContent = buttonText;
+  for (const id of ['top-connect', 'side-connect', 'network-connect']) $(id).disabled = state === 'connecting';
+  $('wisp-message').classList.toggle('connection-error', Boolean(message));
+}
+function updateWispIssue(message) {
+  if (networkMode !== 'wisp') return;
+  $('wisp-message').textContent = `${message} Use Test selected relay to check its DNS and outbound route, or apply another preset.`;
+  $('wisp-message').classList.add('connection-error');
 }
 function updateWispTraffic(direction, count) {
   if (direction === 'sent') bytesSent += count;
@@ -424,16 +435,87 @@ function updateWispTraffic(direction, count) {
   $('bytes-sent').textContent = format(bytesSent);
   $('bytes-received').textContent = format(bytesReceived);
 }
-$('network-mode').addEventListener('change', () => {
-  $('wisp-settings').hidden = $('network-mode').value !== 'wisp';
+for (const preset of WISP_PRESETS) {
+  const option = document.createElement('option'); option.value = preset.id; option.textContent = preset.name;
+  $('wisp-preset').append(option);
+}
+const customPreset = document.createElement('option'); customPreset.value = 'custom'; customPreset.textContent = 'Custom secure relay';
+$('wisp-preset').append(customPreset);
+function showWispFields(visible) {
+  $('wisp-settings').hidden = !visible;
+  for (const id of ['wisp-url', 'wisp-preset', 'test-relay']) $(id).disabled = !visible || testingRelay;
+}
+function syncRelayPreset() {
+  let normalized;
+  try { normalized = normalizeWispUrl($('wisp-url').value); } catch {}
+  const preset = WISP_PRESETS.find((item) => item.url === normalized);
+  $('wisp-preset').value = preset?.id || 'custom';
+  $('preset-note').textContent = preset?.note || 'Enter the secure URL of a Wisp server you choose.';
+}
+function resetRelayTest() {
+  $('relay-test-results').replaceChildren();
+  $('relay-test-summary').textContent = 'Not tested in this browser. A listed preset is not a guarantee of availability.';
+  $('relay-test-summary').className = 'relay-test-summary';
+}
+$('wisp-preset').addEventListener('change', () => {
+  const preset = WISP_PRESETS.find((item) => item.id === $('wisp-preset').value);
+  if (preset) $('wisp-url').value = preset.url;
+  $('preset-note').textContent = preset?.note || 'Enter the secure URL of a Wisp server you choose.';
+  if (!preset) $('wisp-url').focus();
+  resetRelayTest();
 });
-$('network-settings').addEventListener('submit', (event) => {
-  event.preventDefault();
-  let nextUrl;
-  try { nextUrl = normalizeWispUrl($('wisp-url').value); }
+$('wisp-url').addEventListener('input', () => { syncRelayPreset(); resetRelayTest(); });
+$('network-mode').addEventListener('change', () => showWispFields($('network-mode').value === 'wisp'));
+$('test-relay').addEventListener('click', async () => {
+  if (testingRelay) return;
+  let url;
+  try { url = normalizeWispUrl($('wisp-url').value); }
   catch (error) { toast(error.message); $('wisp-url').focus(); return; }
+  testingRelay = true;
+  resetRelayTest();
+  $('network-mode').disabled = true;
+  $('apply-network').disabled = true;
+  showWispFields(true);
+  $('test-relay').textContent = 'Testing relay…';
+  $('relay-test-summary').textContent = 'Checking the selected endpoint. Your active VM relay stays unchanged.';
+  const rows = new Map();
+  try {
+    const result = await probeWispRelay(url, {onProgress: ({stage, status, detail}) => {
+      let row = rows.get(stage);
+      if (!row) {
+        row = document.createElement('li');
+        const label = document.createElement('strong'); label.textContent = {handshake: 'Wisp handshake', dns: 'DNS through relay', http: 'HTTP route'}[stage];
+        const message = document.createElement('span'); row.append(label, message);
+        rows.set(stage, row); $('relay-test-results').append(row);
+      }
+      row.dataset.status = status;
+      row.lastElementChild.textContent = detail;
+    }});
+    $('relay-test-summary').textContent = result.ok ? `Selected relay passed all checks in ${(result.elapsedMs / 1000).toFixed(1)}s. Apply connection to use it; the HTTPS command checks Debian itself.` : `Failed at ${result.failedStage === 'handshake' ? 'the Wisp handshake' : result.failedStage === 'dns' ? 'DNS' : 'the HTTP route'}: ${result.error}`;
+    $('relay-test-summary').classList.toggle('connection-error', !result.ok);
+    $('relay-test-summary').classList.toggle('test-passed', result.ok);
+  } catch (error) { $('relay-test-summary').textContent = error.message; }
+  finally {
+    testingRelay = false;
+    $('network-mode').disabled = false; $('apply-network').disabled = false;
+    $('test-relay').textContent = 'Test selected relay';
+    showWispFields($('network-mode').value === 'wisp');
+  }
+});
+$('network-settings').addEventListener('submit', async (event) => {
+  event.preventDefault();
   const nextMode = $('network-mode').value;
+  let nextUrl;
+  try { nextUrl = nextMode === 'wisp' ? normalizeWispUrl($('wisp-url').value) : wispUrl; }
+  catch (error) { toast(error.message); $('wisp-url').focus(); return; }
   if (nextMode === networkMode && nextUrl === wispUrl) { toast('Network settings are already saved.'); return; }
+  if (cx && wisp && networkMode === 'wisp' && nextMode === 'wisp') {
+    saveNetworkSettings(nextMode, nextUrl);
+    bytesSent = bytesReceived = 0; updateWispTraffic('sent', 0);
+    try { await wisp.reconnect(nextUrl); toast('Relay changed. Retry any interrupted network commands.'); }
+    catch (error) { toast(error.message); }
+    return;
+  }
   if (!booting && !cx && !outputSeen) {
     saveNetworkSettings(nextMode, nextUrl);
     toast('Network settings saved for the next boot.');
@@ -450,8 +532,7 @@ function openConnection() {
   if (networkMode === 'wisp') {
     showView('network');
     if (!cx) { connectAfterBoot = false; boot(); }
-    else if (wisp?.connection?.connected) toast('The Wisp relay is connected.');
-    else wisp?.up().catch((error) => toast(error.message));
+    else wisp?.reconnect(wispUrl).catch((error) => toast(error.message));
     return;
   }
   showDialog('connect-dialog');
